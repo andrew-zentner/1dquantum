@@ -137,6 +137,24 @@ def box_energy(n: int) -> float:
     e = 0.5*(float(n)**2)*(np.pi**2)
     return e
 
+#-------------------------------------------------------------------
+# free particle
+#-------------------------------------------------------------------
+def free_particle(y: np.ndarray, n: int, L: float=1.0) -> np.ndarray:
+    psi = np.exp(-2.0j*np.pi*float(n)*y/L)/np.sqrt(L)
+    return psi
+
+#-------------------------------------------------------------------
+# free particle energies (periodic box)
+#-------------------------------------------------------------------
+def free_particle_energy(n: int, L: float = 1.0) -> float:
+    """
+    Energy eigenvalue corresponding to free_particle(y, n, L)
+    for Hamiltonian H = -1/2 d^2/dy^2.
+    """
+    k = 2.0 * np.pi * float(n) / L
+    return 0.5 * k**2
+
 
 #-------------------------------------------------------------------
 #

@@ -23,6 +23,7 @@ class Grid1D:
     k: Array   # FFT wavenumbers conjugate to y (Ny,)
     kmax : Array # maximum wavenumber
     dy: float  # spacing
+    L: float # length of the computational domain.
 
 
 def make_grid(N: int, y_max: float) -> Grid1D:
@@ -33,8 +34,19 @@ def make_grid(N: int, y_max: float) -> Grid1D:
     dy = float(y[1] - y[0])
     k = 2.0 * np.pi * np.fft.fftfreq(N, d=dy)
     kmax = np.max(np.abs(k))
+    L = 2.0*y_max
 
-    return Grid1D(y=y, k=k, kmax=kmax, dy=dy)
+    return Grid1D(y=y, k=k, kmax=kmax, dy=dy, L=L)
+
+
+def make_periodic_grid(Ncells,Nppc,a=1.0) -> tuple[Grid1D, float]:
+    """
+    make a periodic grid for periodic problems.
+    """
+    N = Ncells*Nppc # total number of points in the computational domain
+    L = Ncells*a    # length of the computational domain.
+    y_max = L/2.0
+    return make_grid(N,y_max), L
 
 
 def normalize(psi: Array, dy: float) -> Array:
