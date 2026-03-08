@@ -59,6 +59,7 @@ def normalize(psi: Array, dy: float) -> Array:
     return psi / nrm
 
 
+#--------- Strang propagation with fft for kinetic term ---- 
 def split_step_propagate(
     psi0: Array,
     V_of_y_tau: Potential1D,
@@ -79,6 +80,8 @@ def split_step_propagate(
     y, k, dy = grid.y, grid.k, grid.dy
 
     psi = np.array(psi0, dtype=np.complex128, copy=True)
+    if psi.shape != y.shape:
+        raise ValueError(f"psi0 has shape {psi.shape}, expected {y.shape}.")
     psi = normalize(psi, dy)
 
     tau_grid = np.asarray(tau_grid, dtype=float)
@@ -124,7 +127,7 @@ def split_step_propagate(
     diagnostics = {"tau": tau_grid.copy(), "norm": norms}
     return (psi_out if return_all else psi), diagnostics
 
-
+#--- 4th order Yoshida with Strang-split steps -----------------
 def yoshida_step_propagate(
     psi0: Array,
     V_of_y_tau: Potential1D,
@@ -141,6 +144,8 @@ def yoshida_step_propagate(
     y, k, dy = grid.y, grid.k, grid.dy
 
     psi = np.array(psi0, dtype=np.complex128, copy=True)
+    if psi.shape != y.shape:
+        raise ValueError(f"psi0 has shape {psi.shape}, expected {y.shape}.")
     psi = normalize(psi, dy)
 
     tau_grid = np.asarray(tau_grid, dtype=float)

@@ -101,7 +101,7 @@ class QuarticPotential:
     lam: float
 
     def __call__(self, y:np.ndarray, 
-                 tau: float) -> float:
+                 tau: float) -> np.ndarray:
         y=np.asarray(y)
         v = self.lam*(y**4)
         return v
@@ -168,11 +168,11 @@ class MultiSquareWells:
         Give the centers of the wells in dimensionless units.
         """
         idx = np.arange(self.N_wells,dtype=float)
-        return float(self.center) + (idx - 0.5*(self.N_wells-1)*self.a)
+        return float(self.center) + (idx - 0.5*(self.N_wells-1))*self.a
     
     def __call__(self,
                  y:np.ndarray,
-                 tau: float) -> np.npdarray:
+                 tau: float) -> np.ndarray:
         y=np.asarray(y,dtype=float)
 
         V0=float(self.V0)
@@ -237,9 +237,11 @@ class SquareBarrier:
                  tau: float ) -> np.ndarray:
         y=np.asarray(y,dtype=float)
         v_out=np.zeros_like(y,dtype=float)
-        v_out[np.abs(y-float(self.a) <= 0.5)] = float(self.v0)
+        v_out[np.abs(y-float(self.a)) <= 0.5] = float(self.v0)
         return v_out
     
+
+
 
 #---------------------------------------
 #
