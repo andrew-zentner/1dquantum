@@ -231,7 +231,7 @@ def make_grid_dirichlet(N: int, y_max: float) -> Grid1D:
     k = (np.pi * n / L).astype(float)  # Dirichlet Laplacian eigen-wavenumbers
     kmax = np.max(np.abs(k))
 
-    return Grid1D(y=y, k=k, kmax=kmax, dy=float(dy))
+    return Grid1D(y=y, k=k, kmax=kmax, dy=float(dy), L=L)
 
 
 def _dst_ortho(x: Array) -> Array:

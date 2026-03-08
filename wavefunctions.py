@@ -57,7 +57,7 @@ def ho_energy(n: int) -> float:
     """
     Harmonic oscillator eigenstate energies in units of hbar*omega.
     """
-    e = 0.5*float(n)
+    e = float(n) + 0.5
     return e
 
 #--- harmonic oscillator number operator

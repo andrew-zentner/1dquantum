@@ -160,7 +160,7 @@ def save_two_panel_movie(
     Omega_vals: np.ndarray,             # precomputed Omega(tau) on tau grid
     N_vals: np.ndarray,                 # precomputed <N(tau)> on tau grid
     potential_overlay=None,             # callable V_of_tau(y,tau)->array(Ny), or None
-    outfile: str = "HO_two_panel.mp4",
+    outfile: str = "movie.mp4",
     what: str = "abs2",
     stride: int = 1,
     fps: int = 30,
