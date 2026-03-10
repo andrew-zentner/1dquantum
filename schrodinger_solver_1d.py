@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from scipy.fft import dst, idst  # requires SciPy
+from scipy.fft import fft as sfft, ifft as sifft, dst, idst  # requires SciPy
 from dataclasses import dataclass
 from typing import Callable, Dict, Protocol, Tuple, Optional
 from potentials_1d import CachedPotential
@@ -157,9 +157,9 @@ def split_step_propagate(
         psi *= phase_V_half
 
         # kinetic kick in k-space: T = k^2/2
-        psi_k = np.fft.fft(psi)
+        psi_k = sfft(psi, workers=-1)
         psi_k *= _phase_k if _phase_k is not None else np.exp(-1.0j * dt * (k ** 2) / 2.0)
-        psi = np.fft.ifft(psi_k)
+        psi = sifft(psi_k, workers=-1)
 
         # half potential kick
         psi *= phase_V_half
@@ -271,9 +271,9 @@ def yoshida_step_propagate(
             phase_V_half = np.exp(-0.5j * dt_sub * Vmid)
 
         psi_arr *= phase_V_half
-        psi_k = np.fft.fft(psi_arr)
+        psi_k = sfft(psi_arr, workers=-1)
         psi_k *= phase_k_pre if phase_k_pre is not None else np.exp(-1.0j * dt_sub * (k ** 2) / 2.0)
-        psi_arr[:] = np.fft.ifft(psi_k)
+        psi_arr[:] = sifft(psi_k, workers=-1)
         psi_arr *= phase_V_half
 
     for n in range(Nt - 1):
@@ -545,8 +545,8 @@ def expectation_H(
     # <T> = ∫ ψ* (-1/2 ψ'') dy  (computed spectrally, consistent with your propagator)
     if bc.lower() == "fft":
         # Periodic spectral second derivative: ψ'' = ifft( -(k^2) fft(ψ) )
-        psi_k = np.fft.fft(psi)
-        psi_dd = np.fft.ifft(-(k**2) * psi_k)
+        psi_k = sfft(psi, workers=-1)
+        psi_dd = sifft(-(k**2) * psi_k, workers=-1)
         Texp = float(np.real(np.sum(np.conj(psi) * (-0.5 * psi_dd)) * dy))
 
     elif bc.lower() == "dst":
