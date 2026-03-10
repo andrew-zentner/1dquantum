@@ -68,6 +68,7 @@ def split_step_propagate(
     grid: Grid1D,
     return_all: bool = True,
     time_independent: bool = False,
+    cap: Optional[Array] = None,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Time-dependent 1D Schrödinger equation in units where:
@@ -88,6 +89,12 @@ def split_step_propagate(
         When True and tau_grid is uniform, both the potential and kinetic
         phase factors are pre-computed once before the loop, which gives a
         significant speed improvement.
+    cap : (Ny,) real array, optional
+        Complex absorbing potential profile W(y) >= 0.  When provided, an
+        extra damping factor exp(-W dt/2) is folded into each potential
+        half-kick, smoothly absorbing probability near the domain boundaries.
+        Use ComplexAbsorbingPotential from potentials_1d to build W.
+        The norm in diagnostics["norm"] will decrease as probability is absorbed.
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -123,6 +130,7 @@ def split_step_propagate(
 
     _phase_k: Optional[Array] = None
     _phase_V_half: Optional[Array] = None
+    _cap_half: Optional[Array] = None
 
     if uniform_dt:
         _phase_k = np.exp(-1.0j * float(dtaus[0]) * (k ** 2) / 2.0)
@@ -132,6 +140,18 @@ def split_step_propagate(
         if _V0.shape != y.shape:
             raise ValueError(f"V_of_y_tau returned shape {_V0.shape}, expected {y.shape}.")
         _phase_V_half = np.exp(-0.5j * float(dtaus[0]) * _V0)
+
+    # Pre-compute CAP damping factor and fold into _phase_V_half when possible.
+    if cap is not None:
+        cap = np.asarray(cap, dtype=float)
+        if cap.shape != y.shape:
+            raise ValueError(f"cap has shape {cap.shape}, expected {y.shape}.")
+        if np.any(cap < 0.0):
+            raise ValueError("cap (absorption profile W) must be non-negative everywhere.")
+        if uniform_dt:
+            _cap_half = np.exp(-0.5 * float(dtaus[0]) * cap)
+        if _phase_V_half is not None and _cap_half is not None:
+            _phase_V_half = _phase_V_half * _cap_half   # merge into single array
 
     psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
     norms = np.empty(Nt, dtype=float)
@@ -144,6 +164,7 @@ def split_step_propagate(
 
         # Potential phase: use pre-computed array if available,
         # otherwise evaluate V at the step midpoint and compute on the fly.
+        # CAP damping is folded in here as well (exp(-W dt/2)).
         if _phase_V_half is not None:
             phase_V_half = _phase_V_half
         else:
@@ -152,6 +173,10 @@ def split_step_propagate(
             if Vmid.shape != y.shape:
                 raise ValueError(f"V_of_y_tau returned shape {Vmid.shape}, expected {y.shape}.")
             phase_V_half = np.exp(-0.5j * dt * Vmid)
+            if _cap_half is not None:
+                phase_V_half = phase_V_half * _cap_half
+            elif cap is not None:                    # non-uniform dt: compute on the fly
+                phase_V_half = phase_V_half * np.exp(-0.5 * dt * cap)
 
         # half potential kick
         psi *= phase_V_half
@@ -179,6 +204,7 @@ def yoshida_step_propagate(
     grid: Grid1D,
     return_all: bool = True,
     time_independent: bool = False,
+    cap: Optional[Array] = None,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Same TDSE as split_step_propagate(), but with a 4th-order Suzuki–Yoshida
@@ -196,6 +222,13 @@ def yoshida_step_propagate(
         and tau_grid is uniform, all six phase arrays (two kinetic, two
         potential, one pair per distinct sub-step size) are pre-computed once
         before the loop.
+    cap : (Ny,) real array, optional
+        Complex absorbing potential profile W(y) >= 0.  Applied as a Strang
+        half-kick exp(-W dt/2) around each full outer Yoshida step.  The CAP
+        is intentionally applied at the outer-step level rather than inside the
+        sub-steps to avoid amplification from the negative Yoshida b-coefficient.
+        Use ComplexAbsorbingPotential from potentials_1d to build W.
+        The norm in diagnostics["norm"] will decrease as probability is absorbed.
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -250,6 +283,18 @@ def yoshida_step_propagate(
         _phase_V_a = np.exp(-0.5j * a * dt0 * _V0)
         _phase_V_b = np.exp(-0.5j * b * dt0 * _V0)
 
+    # Pre-compute CAP half-kick for the outer step (applied around the full
+    # Yoshida composition to avoid amplification from the negative b sub-step).
+    _cap_half: Optional[Array] = None
+    if cap is not None:
+        cap = np.asarray(cap, dtype=float)
+        if cap.shape != y.shape:
+            raise ValueError(f"cap has shape {cap.shape}, expected {y.shape}.")
+        if np.any(cap < 0.0):
+            raise ValueError("cap (absorption profile W) must be non-negative everywhere.")
+        if uniform_dt:
+            _cap_half = np.exp(-0.5 * dt0 * cap)
+
     psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
     norms = np.empty(Nt, dtype=float)
     if return_all:
@@ -280,11 +325,23 @@ def yoshida_step_propagate(
         dt = float(dtaus[n])
         tau0 = float(tau_grid[n])
 
+        # CAP half-kick before the Yoshida sub-steps.
+        if _cap_half is not None:
+            psi *= _cap_half
+        elif cap is not None:
+            psi *= np.exp(-0.5 * dt * cap)
+
         # Compose: S(a dt) S(b dt) S(a dt)
         # Pre-computed phase arrays are passed in when available (not None).
         strang_step_inplace(psi, tau0,              a * dt, _phase_k_a, _phase_V_a)
         strang_step_inplace(psi, tau0 + a * dt,     b * dt, _phase_k_b, _phase_V_b)
         strang_step_inplace(psi, tau0 + (a+b) * dt, a * dt, _phase_k_a, _phase_V_a)
+
+        # CAP half-kick after the Yoshida sub-steps.
+        if _cap_half is not None:
+            psi *= _cap_half
+        elif cap is not None:
+            psi *= np.exp(-0.5 * dt * cap)
 
         if return_all:
             psi_out[n + 1] = psi

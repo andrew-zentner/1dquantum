@@ -219,25 +219,28 @@ class StepBarrier:
 
 #-----------------------------------
 #
-# Square barrier of height V0, width L=1, and center position a.
+# Square barrier of height v0, width w (default 1.0), centred at a (default 0.0).
 #
-# y = x/L
-# position is in units of L, a = x_center/L
-# E_L = hbar^2/(m*L^2)
-# V0 = Potential/E_L
+# The barrier occupies  a - w/2  <=  y  <=  a + w/2.
+#
+# y = x/L_ref  (dimensionless position)
+# v0 = V0 / E_ref  (dimensionless height)
+# w  = barrier width in the same units as y  (default 1.0)
+# a  = barrier centre in the same units as y (default 0.0)
 #
 #-----------------------------------
 @dataclass(frozen=True)
 class SquareBarrier:
     v0: float
-    a: float = 0.0 # center of barrier
+    a: float = 0.0   # centre of barrier
+    w: float = 1.0   # width of barrier
 
     def __call__(self,
                  y: np.ndarray,
-                 tau: float ) -> np.ndarray:
-        y=np.asarray(y,dtype=float)
-        v_out=np.zeros_like(y,dtype=float)
-        v_out[np.abs(y-float(self.a)) <= 0.5] = float(self.v0)
+                 tau: float) -> np.ndarray:
+        y = np.asarray(y, dtype=float)
+        v_out = np.zeros_like(y, dtype=float)
+        v_out[np.abs(y - float(self.a)) <= 0.5 * float(self.w)] = float(self.v0)
         return v_out
     
 
@@ -602,6 +605,71 @@ def Vsum(*pots):
     return SumPotential(tuple(flat))
 
     
+#----------------------------------------------------------------
+#
+# Complex Absorbing Potential (CAP)
+#
+# Returns the real absorption profile W(y) >= 0.
+#
+# The propagators add -i*W to the effective Hamiltonian, causing
+# probability to be smoothly absorbed near the domain boundaries
+# instead of wrapping around (periodic BC artefact).
+#
+# Profile: quadratic ramp from 0 at the inner edge of the absorbing
+# layer to `strength` at the hard boundary ±y_max.
+#
+#   W(y) = strength * ( distance_into_layer / width )^2
+#
+# Parameters
+# ----------
+# strength : peak absorption rate W0 > 0  (units: 1/time)
+# width    : thickness of each absorbing layer  (same units as y)
+# y_max    : half-width of the computational domain; walls at ±y_max
+#
+# Usage
+# -----
+#   cap = ComplexAbsorbingPotential(strength=0.5, width=2.0, y_max=12.0)
+#   W   = cap(grid.y, 0.0)   # real array, shape (N,)
+#   psi_t, diag = split_step_propagate(..., cap=W)
+#
+#----------------------------------------------------------------
+@dataclass(frozen=True)
+class ComplexAbsorbingPotential:
+    strength: float   # peak absorption rate W0
+    width: float      # thickness of each absorbing layer
+    y_max: float      # domain half-width; boundaries at ±y_max
+
+    def __post_init__(self):
+        if self.strength <= 0.0:
+            raise ValueError("strength must be > 0.")
+        if self.width <= 0.0:
+            raise ValueError("width must be > 0.")
+        if self.y_max <= 0.0:
+            raise ValueError("y_max must be > 0.")
+        if self.width >= self.y_max:
+            raise ValueError(
+                "width must be less than y_max "
+                "(absorbing layer must fit inside the domain)."
+            )
+
+    def __call__(self, y: np.ndarray, tau: float) -> np.ndarray:
+        y = np.asarray(y, dtype=float)
+        W = np.zeros_like(y, dtype=float)
+
+        # Right absorbing layer: inner edge at y_max - width, wall at +y_max
+        d_r = y - (self.y_max - self.width)
+        mask_r = d_r > 0.0
+        W[mask_r] += self.strength * (d_r[mask_r] / self.width) ** 2
+
+        # Left absorbing layer: inner edge at -y_max + width, wall at -y_max
+        d_l = (-self.y_max + self.width) - y
+        mask_l = d_l > 0.0
+        W[mask_l] += self.strength * (d_l[mask_l] / self.width) ** 2
+
+        return W
+#----------------------------------------------------------------
+
+
 #----------------------------------------------------------------
 #
 # Use Cached Potentials for time-independent potentials to improve speed.
