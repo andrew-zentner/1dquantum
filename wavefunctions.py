@@ -158,6 +158,63 @@ def free_particle_energy(n: int, L: float = 1.0) -> float:
 
 #-------------------------------------------------------------------
 #
+# Gaussian wavepacket (moving)
+#
+# Useful as an initial state for 1D scattering problems.
+#
+# lengths in dimensionless units y = x / L_ref
+# momenta in dimensionless units k = p * L_ref / hbar
+#
+#-------------------------------------------------------------------
+def gaussian_wavepacket(y: np.ndarray,
+                        y0: float,
+                        k0: float,
+                        sigma: float) -> np.ndarray:
+    """
+    Minimum-uncertainty Gaussian wavepacket:
+
+        psi(y) = (2 pi sigma^2)^(-1/4)
+                 * exp( -(y - y0)^2 / (4 sigma^2) )
+                 * exp(  i k0 y )
+
+    Parameters
+    ----------
+    y     : grid positions, shape (Ny,)
+    y0    : center of the wavepacket
+    k0    : central wavenumber (= mean momentum in units where hbar=m=1);
+            positive -> moves right, negative -> moves left
+    sigma : Gaussian width (position uncertainty Delta_y = sigma)
+
+    The wavepacket satisfies Delta_y * Delta_p = 1/2 (minimum uncertainty).
+    Mean energy under H = -1/2 d^2/dy^2:  E = k0^2/2 + 1/(8 sigma^2).
+    """
+    if sigma <= 0.0:
+        raise ValueError("sigma must be > 0.")
+
+    y = np.asarray(y, dtype=float)
+    norm = (2.0 * np.pi * sigma**2) ** (-0.25)
+    envelope = np.exp(-((y - y0) ** 2) / (4.0 * sigma**2))
+    carrier  = np.exp(1.0j * k0 * y)
+    return (norm * envelope * carrier).astype(np.complex128)
+
+
+def gaussian_wavepacket_energy(k0: float, sigma: float) -> float:
+    """
+    Mean energy of gaussian_wavepacket under H = -1/2 d^2/dy^2:
+
+        E = k0^2 / 2  +  1 / (8 sigma^2)
+
+    The first term is the kinetic energy of the moving center of mass;
+    the second is the zero-point kinetic energy from the momentum spread
+    Delta_p = 1 / (2 sigma).
+    """
+    if sigma <= 0.0:
+        raise ValueError("sigma must be > 0.")
+    return 0.5 * k0**2 + 1.0 / (8.0 * sigma**2)
+
+
+#-------------------------------------------------------------------
+#
 # General utilities
 #
 #--------------------------------------------------------------------
