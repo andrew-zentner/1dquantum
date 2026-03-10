@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, Optional, Union
 import matplotlib.pyplot as plt
 
 import numpy as np
@@ -8,6 +8,559 @@ import math
 
 from matplotlib.animation import FuncAnimation
 from IPython.display import Video
+
+
+# =============================================================================
+#
+#  make_movie — general-purpose wavefunction movie with right-axis potential
+#
+#  Typical use:
+#
+#    psi_t, diag = split_step_propagate(psi0, V, tau_grid, grid, ...)
+#    make_movie(psi_t, grid, diag["tau"], "scattering.mp4", potential=V)
+#
+# =============================================================================
+def make_movie(
+    psi_t: np.ndarray,
+    grid,
+    tau: np.ndarray,
+    outfile: str = "movie.mp4",
+    what: str = "abs2",
+    potential=None,
+    stride: int = 1,
+    fps: int = 30,
+    dpi: int = 150,
+    xlim: Optional[tuple] = None,
+    ylim: Optional[tuple] = None,
+    Vlim: Optional[tuple] = None,
+    figsize: tuple = (8, 4.5),
+    psi_color: str = "tab:blue",
+    potential_color: str = "tab:orange",
+    potential_alpha: float = 0.8,
+    psi_lw: float = 2.0,
+    potential_lw: float = 2.0,
+) -> str:
+    """
+    Save an animation of the wavefunction evolution to an .mp4 or .gif file.
+
+    The wavefunction quantity is plotted on the left y-axis.  When a potential
+    is provided it is drawn on a dedicated right-hand y-axis (using its own
+    physical units, color-coded to distinguish it from the wavefunction).
+
+    Parameters
+    ----------
+    psi_t     : (Nt, Ny) complex array returned by a propagator.
+    grid      : Grid1D returned by make_grid or make_periodic_grid.
+    tau       : (Nt,) time values, e.g. diagnostics["tau"].
+    outfile   : output path; must end in ".mp4" or ".gif".
+    what      : quantity to animate — one of:
+                  "abs2"  |psi|^2  (default, most useful for scattering)
+                  "abs"   |psi|
+                  "real"  Re psi
+                  "imag"  Im psi
+    potential : how to display the potential — three options:
+                  None          no potential shown (default)
+                  (Ny,) array   static potential, plotted as a fixed line
+                  callable      V(y, tau) -> (Ny,) for a time-varying
+                                potential; the line is updated each frame
+    stride    : plot every stride-th frame to control movie length / file size.
+    fps       : frames per second in the output file.
+    dpi       : output resolution in dots per inch.
+    xlim      : (xmin, xmax) for the spatial axis; auto if None.
+    ylim      : (ymin, ymax) for the wavefunction (left) axis; auto if None.
+    Vlim      : (Vmin, Vmax) for the potential (right) axis; auto if None.
+    figsize   : figure dimensions in inches, default (8, 4.5).
+    psi_color       : color of the wavefunction line, default "tab:blue".
+    potential_color : color of the potential line, default "tab:orange".
+    potential_alpha : opacity of the potential line, default 0.8.
+    psi_lw          : line width of the wavefunction line, default 2.0.
+    potential_lw    : line width of the potential line, default 2.0.
+
+    Returns
+    -------
+    outfile : the path that was written.
+
+    Examples
+    --------
+    # Minimal call — no potential shown
+    make_movie(psi_t, grid, diag["tau"], "free.mp4")
+
+    # Static potential from a pre-evaluated array
+    V_arr = SquareBarrier(v0=5.0)(grid.y, 0.0)
+    make_movie(psi_t, grid, diag["tau"], "barrier.mp4", potential=V_arr)
+
+    # Time-varying potential (callable)
+    make_movie(psi_t, grid, diag["tau"], "ramp.mp4", potential=V_ho,
+               what="abs2", stride=5, title=r"Harmonic ramp")
+    """
+    psi_t = np.asarray(psi_t)
+    y     = np.asarray(grid.y, dtype=float)
+    tau   = np.asarray(tau, dtype=float)
+
+    # --- input validation ---
+    if psi_t.ndim != 2:
+        raise ValueError("psi_t must have shape (Nt, Ny).")
+    Nt, Ny = psi_t.shape
+    if y.size != Ny:
+        raise ValueError(f"grid.y has size {y.size} but psi_t has Ny={Ny}.")
+    if tau.size != Nt:
+        raise ValueError(f"tau has size {tau.size} but psi_t has Nt={Nt}.")
+    if stride < 1:
+        raise ValueError("stride must be >= 1.")
+
+    _labels = {
+        "abs2": r"$|\psi|^2$",
+        "abs":  r"$|\psi|$",
+        "real": r"$\mathrm{Re}\,\psi$",
+        "imag": r"$\mathrm{Im}\,\psi$",
+    }
+    if what not in _labels:
+        raise ValueError(f"what must be one of {list(_labels)}.")
+
+    def extract(arr: np.ndarray) -> np.ndarray:
+        if what == "abs2": return np.abs(arr) ** 2
+        if what == "abs":  return np.abs(arr)
+        if what == "real": return arr.real
+        return arr.imag
+
+    frames = np.arange(0, Nt, stride)
+
+    # --- potential mode detection ---
+    _V_arr:      Optional[np.ndarray] = None  # set if static array provided
+    _V_callable: Optional[Callable]   = None  # set if callable provided
+
+    if potential is not None:
+        if callable(potential):
+            _V_callable = potential
+        else:
+            _V_arr = np.asarray(potential, dtype=float)
+            if _V_arr.shape != y.shape:
+                raise ValueError(
+                    f"potential array shape {_V_arr.shape} does not match "
+                    f"grid.y shape {y.shape}."
+                )
+
+    def _get_V(tau_val: float) -> Optional[np.ndarray]:
+        if _V_callable is not None:
+            return np.asarray(_V_callable(y, tau_val), dtype=float)
+        return _V_arr  # None if no potential
+
+    # --- figure and left axis ---
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.subplots_adjust(right=0.87 if potential is not None else 0.95)
+
+    ax.set_xlabel(r"$y$", fontsize=13)
+    ax.set_ylabel(_labels[what], fontsize=13, color=psi_color)
+    ax.tick_params(axis="y", colors=psi_color, labelsize=10)
+    ax.tick_params(axis="x", labelsize=10)
+    ax.yaxis.label.set_color(psi_color)
+
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    else:
+        ax.set_xlim(float(y[0]), float(y[-1]))
+
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    else:
+        sample = np.array([extract(psi_t[i]) for i in frames])
+        ymin, ymax = float(sample.min()), float(sample.max())
+        pad = 0.08 * (ymax - ymin + 1e-15)
+        ax.set_ylim(ymin - pad, ymax + pad)
+
+    # wavefunction line
+    (psi_line,) = ax.plot(
+        y, extract(psi_t[frames[0]]),
+        color=psi_color, lw=psi_lw, zorder=3
+    )
+
+    # time label
+    time_text = ax.text(
+        0.02, 0.96, f"$\\tau = {tau[frames[0]]:.3f}$",
+        transform=ax.transAxes, va="top", ha="left",
+        fontsize=11, color="0.35"
+    )
+
+    # --- right axis and potential line ---
+    axV     = None
+    V_line  = None
+
+    if potential is not None:
+        axV = ax.twinx()
+        axV.set_ylabel(
+            r"$V(y,\tau)$" if _V_callable is not None else r"$V(y)$",
+            fontsize=13, color=potential_color
+        )
+        axV.tick_params(axis="y", colors=potential_color, labelsize=10)
+        axV.yaxis.label.set_color(potential_color)
+
+        # V-axis limits
+        if Vlim is not None:
+            axV.set_ylim(*Vlim)
+        else:
+            if _V_callable is not None:
+                Vsample = np.array([_get_V(float(tau[i])) for i in frames])
+            else:
+                Vsample = _V_arr[np.newaxis, :]
+            Vmin, Vmax = float(Vsample.min()), float(Vsample.max())
+            Vpad = 0.08 * (Vmax - Vmin + 1e-15)
+            axV.set_ylim(Vmin - Vpad, Vmax + Vpad)
+
+        V0 = _get_V(float(tau[frames[0]]))
+        (V_line,) = axV.plot(
+            y, V0,
+            color=potential_color, lw=potential_lw, ls="--",
+            alpha=potential_alpha, zorder=2
+        )
+
+    # --- animation ---
+    def update(fi: int):
+        idx = frames[fi]
+
+        psi_line.set_ydata(extract(psi_t[idx]))
+        time_text.set_text(f"$\\tau = {tau[idx]:.3f}$")
+
+        if V_line is not None and _V_callable is not None:
+            V_line.set_ydata(_get_V(float(tau[idx])))
+
+    anim = FuncAnimation(
+        fig, update, frames=len(frames), interval=1000 / fps, blit=False
+    )
+
+    # H.264 (and most video codecs) require both pixel dimensions to be even.
+    # Enforce this by nudging the figure size up by 1 pixel if needed.
+    if outfile.lower().endswith(".mp4"):
+        _w_px = round(fig.get_figwidth()  * dpi)
+        _h_px = round(fig.get_figheight() * dpi)
+        if _w_px % 2 != 0:
+            fig.set_size_inches((_w_px + 1) / dpi, fig.get_figheight())
+        if _h_px % 2 != 0:
+            fig.set_size_inches(fig.get_figwidth(), (_h_px + 1) / dpi)
+
+    if outfile.lower().endswith(".gif"):
+        anim.save(outfile, writer="pillow", fps=fps, dpi=dpi)
+    elif outfile.lower().endswith(".mp4"):
+        anim.save(outfile, writer="ffmpeg", fps=fps, dpi=dpi)
+    else:
+        raise ValueError('outfile must end in ".mp4" or ".gif".')
+
+    plt.close(fig)
+    return outfile
+
+
+# =============================================================================
+#
+#  make_two_panel_movie — wavefunction + potential (left) and <N(τ)> (right)
+#
+#  Typical use:
+#
+#    from wavefunctions import number_expectation
+#    k      = np.fft.fftfreq(grid.Ny, d=grid.dy) * 2 * np.pi
+#    N_vals = number_expectation(psi_t, grid.y, k, grid.dy,
+#                                diag["tau"], Omega_of_tau=omega_ramp)
+#    Omega_vals = np.array([omega_ramp(t) for t in diag["tau"]])
+#    make_two_panel_movie(psi_t, grid, diag["tau"], N_vals,
+#                         outfile="ramp.mp4", potential=V,
+#                         Omega_vals=Omega_vals)
+#
+# =============================================================================
+def make_two_panel_movie(
+    psi_t: np.ndarray,
+    grid,
+    tau: np.ndarray,
+    N_vals: np.ndarray,
+    outfile: str = "movie.mp4",
+    what: str = "abs2",
+    potential=None,
+    Omega_vals: Optional[np.ndarray] = None,
+    stride: int = 1,
+    fps: int = 30,
+    dpi: int = 150,
+    xlim: Optional[tuple] = None,
+    ylim: Optional[tuple] = None,
+    Vlim: Optional[tuple] = None,
+    Nlim: Optional[tuple] = None,
+    OmegaLim: Optional[tuple] = None,
+    figsize: tuple = (12, 4.5),
+    psi_color: str = "tab:blue",
+    potential_color: str = "tab:orange",
+    potential_alpha: float = 0.8,
+    psi_lw: float = 2.0,
+    potential_lw: float = 2.0,
+    N_color: str = "tab:blue",
+    N_lw: float = 2.0,
+    Omega_color: str = "tab:orange",
+    Omega_lw: float = 2.0,
+) -> str:
+    """
+    Two-panel animation:
+      Left:  wavefunction quantity on left y-axis, V(y,τ) on right y-axis
+             (identical layout to make_movie).
+      Right: <N̂(τ)> growing history on left y-axis; optional Ω(τ) growing
+             history on right y-axis (pass Omega_vals to enable).
+
+    N_vals must be pre-computed before calling this function, e.g. via
+    wavefunctions.number_expectation.
+
+    Parameters
+    ----------
+    psi_t     : (Nt, Ny) complex array returned by a propagator.
+    grid      : Grid1D returned by make_grid or make_periodic_grid.
+    tau       : (Nt,) time values, e.g. diagnostics["tau"].
+    N_vals    : (Nt,) pre-computed <N̂(τ)> (from number_expectation).
+    outfile   : output path; must end in ".mp4" or ".gif".
+    what      : quantity to animate — "abs2", "abs", "real", or "imag".
+    potential : None / (Ny,) array / callable V(y,τ); shown on right axis
+                of the left panel.
+    Omega_vals: (Nt,) optional Ω(τ) array; if provided it is shown on the
+                right axis of the right panel.
+    stride    : plot every stride-th frame.
+    fps       : frames per second.
+    dpi       : output resolution.
+    xlim      : (xmin, xmax) for the spatial axis; auto if None.
+    ylim      : (ymin, ymax) for the wavefunction axis; auto if None.
+    Vlim      : (Vmin, Vmax) for the potential axis; auto if None.
+    Nlim      : (Nmin, Nmax) for the <N̂> axis; auto if None.
+    OmegaLim  : (Omin, Omax) for the Ω axis; auto if None.
+    figsize   : figure size in inches, default (12, 4.5).
+    psi_color       : color of the wavefunction line, default "tab:blue".
+    potential_color : color of the potential line, default "tab:orange".
+    potential_alpha : opacity of the potential line, default 0.8.
+    psi_lw          : line width of the wavefunction line, default 2.0.
+    potential_lw    : line width of the potential line, default 2.0.
+    N_color    : color of the <N̂> history line, default "tab:blue".
+    N_lw       : line width of the <N̂> line, default 2.0.
+    Omega_color: color of the Ω history line, default "tab:orange".
+    Omega_lw   : line width of the Ω line, default 2.0.
+
+    Returns
+    -------
+    outfile : the path that was written.
+    """
+    psi_t  = np.asarray(psi_t)
+    y      = np.asarray(grid.y, dtype=float)
+    tau    = np.asarray(tau,    dtype=float)
+    N_vals = np.asarray(N_vals, dtype=float)
+
+    # --- input validation ---
+    if psi_t.ndim != 2:
+        raise ValueError("psi_t must have shape (Nt, Ny).")
+    Nt, Ny = psi_t.shape
+    if y.size != Ny:
+        raise ValueError(f"grid.y has size {y.size} but psi_t has Ny={Ny}.")
+    if tau.size != Nt:
+        raise ValueError(f"tau has size {tau.size} but psi_t has Nt={Nt}.")
+    if N_vals.size != Nt:
+        raise ValueError(f"N_vals has size {N_vals.size} but psi_t has Nt={Nt}.")
+    if Omega_vals is not None:
+        Omega_vals = np.asarray(Omega_vals, dtype=float)
+        if Omega_vals.size != Nt:
+            raise ValueError(f"Omega_vals has size {Omega_vals.size} but psi_t has Nt={Nt}.")
+    if stride < 1:
+        raise ValueError("stride must be >= 1.")
+
+    _labels = {
+        "abs2": r"$|\psi|^2$",
+        "abs":  r"$|\psi|$",
+        "real": r"$\mathrm{Re}\,\psi$",
+        "imag": r"$\mathrm{Im}\,\psi$",
+    }
+    if what not in _labels:
+        raise ValueError(f"what must be one of {list(_labels)}.")
+
+    def extract(arr: np.ndarray) -> np.ndarray:
+        if what == "abs2": return np.abs(arr) ** 2
+        if what == "abs":  return np.abs(arr)
+        if what == "real": return arr.real
+        return arr.imag
+
+    frames = np.arange(0, Nt, stride)
+
+    # --- potential mode detection (same as make_movie) ---
+    _V_arr:      Optional[np.ndarray] = None
+    _V_callable: Optional[Callable]   = None
+
+    if potential is not None:
+        if callable(potential):
+            _V_callable = potential
+        else:
+            _V_arr = np.asarray(potential, dtype=float)
+            if _V_arr.shape != y.shape:
+                raise ValueError(
+                    f"potential array shape {_V_arr.shape} does not match "
+                    f"grid.y shape {y.shape}."
+                )
+
+    def _get_V(tau_val: float) -> Optional[np.ndarray]:
+        if _V_callable is not None:
+            return np.asarray(_V_callable(y, tau_val), dtype=float)
+        return _V_arr
+
+    # =========================================================================
+    # Figure layout: two panels, left slightly wider to accommodate potential axis
+    # =========================================================================
+    fig, (axL, axR) = plt.subplots(
+        1, 2, figsize=figsize,
+        gridspec_kw={"width_ratios": [1.2, 1.0]}
+    )
+    fig.subplots_adjust(
+        left=0.08, right=0.93, wspace=0.55,
+        top=0.93, bottom=0.13
+    )
+
+    # =========================================================================
+    # LEFT PANEL — wavefunction + potential (mirrors make_movie exactly)
+    # =========================================================================
+    axL.set_xlabel(r"$y$", fontsize=13)
+    axL.set_ylabel(_labels[what], fontsize=13, color=psi_color)
+    axL.tick_params(axis="y", colors=psi_color, labelsize=10)
+    axL.tick_params(axis="x", labelsize=10)
+    axL.yaxis.label.set_color(psi_color)
+
+    if xlim is not None:
+        axL.set_xlim(*xlim)
+    else:
+        axL.set_xlim(float(y[0]), float(y[-1]))
+
+    if ylim is not None:
+        axL.set_ylim(*ylim)
+    else:
+        sample = np.array([extract(psi_t[i]) for i in frames])
+        ymin, ymax = float(sample.min()), float(sample.max())
+        pad = 0.08 * (ymax - ymin + 1e-15)
+        axL.set_ylim(ymin - pad, ymax + pad)
+
+    (psi_line,) = axL.plot(
+        y, extract(psi_t[frames[0]]),
+        color=psi_color, lw=psi_lw, zorder=3
+    )
+
+    time_text = axL.text(
+        0.02, 0.96, f"$\\tau = {tau[frames[0]]:.3f}$",
+        transform=axL.transAxes, va="top", ha="left",
+        fontsize=11, color="0.35"
+    )
+
+    # right axis of left panel (potential)
+    axLV   = None
+    V_line = None
+
+    if potential is not None:
+        axLV = axL.twinx()
+        axLV.set_ylabel(
+            r"$V(y,\tau)$" if _V_callable is not None else r"$V(y)$",
+            fontsize=13, color=potential_color
+        )
+        axLV.tick_params(axis="y", colors=potential_color, labelsize=10)
+        axLV.yaxis.label.set_color(potential_color)
+
+        if Vlim is not None:
+            axLV.set_ylim(*Vlim)
+        else:
+            if _V_callable is not None:
+                Vsample = np.array([_get_V(float(tau[i])) for i in frames])
+            else:
+                Vsample = _V_arr[np.newaxis, :]
+            Vmin, Vmax = float(Vsample.min()), float(Vsample.max())
+            Vpad = 0.08 * (Vmax - Vmin + 1e-15)
+            axLV.set_ylim(Vmin - Vpad, Vmax + Vpad)
+
+        V0 = _get_V(float(tau[frames[0]]))
+        (V_line,) = axLV.plot(
+            y, V0,
+            color=potential_color, lw=potential_lw, ls="--",
+            alpha=potential_alpha, zorder=2
+        )
+
+    # =========================================================================
+    # RIGHT PANEL — <N̂(τ)> growing history + optional Ω(τ)
+    # =========================================================================
+    axR.set_xlabel(r"$\tau$", fontsize=13)
+    axR.set_ylabel(r"$\langle \hat{N} \rangle$", fontsize=13, color=N_color)
+    axR.tick_params(axis="y", colors=N_color, labelsize=10)
+    axR.tick_params(axis="x", labelsize=10)
+    axR.yaxis.label.set_color(N_color)
+
+    axR.set_xlim(float(tau[frames[0]]), float(tau[frames[-1]]))
+
+    if Nlim is not None:
+        axR.set_ylim(*Nlim)
+    else:
+        Nmin = float(N_vals[frames].min())
+        Nmax = float(N_vals[frames].max())
+        Npad = 0.08 * (Nmax - Nmin + 1e-15)
+        axR.set_ylim(Nmin - Npad, Nmax + Npad)
+
+    t0 = float(tau[frames[0]])
+    (N_line,) = axR.plot(
+        [t0], [N_vals[frames[0]]],
+        color=N_color, lw=N_lw, zorder=3
+    )
+
+    # optional Omega on secondary right axis of right panel
+    axRO       = None
+    Omega_line = None
+
+    if Omega_vals is not None:
+        axRO = axR.twinx()
+        axRO.set_ylabel(r"$\Omega(\tau)$", fontsize=13, color=Omega_color)
+        axRO.tick_params(axis="y", colors=Omega_color, labelsize=10)
+        axRO.yaxis.label.set_color(Omega_color)
+
+        if OmegaLim is not None:
+            axRO.set_ylim(*OmegaLim)
+        else:
+            Omin = float(Omega_vals[frames].min())
+            Omax = float(Omega_vals[frames].max())
+            Opad = 0.08 * (Omax - Omin + 1e-15)
+            axRO.set_ylim(Omin - Opad, Omax + Opad)
+
+        (Omega_line,) = axRO.plot(
+            [t0], [Omega_vals[frames[0]]],
+            color=Omega_color, lw=Omega_lw, ls="--", zorder=2
+        )
+
+    # =========================================================================
+    # Animation update
+    # =========================================================================
+    def update(fi: int):
+        idx      = frames[fi]
+        hist_idx = frames[: fi + 1]
+
+        # left panel
+        psi_line.set_ydata(extract(psi_t[idx]))
+        time_text.set_text(f"$\\tau = {tau[idx]:.3f}$")
+        if V_line is not None and _V_callable is not None:
+            V_line.set_ydata(_get_V(float(tau[idx])))
+
+        # right panel: extend history
+        t_hist = tau[hist_idx]
+        N_line.set_data(t_hist, N_vals[hist_idx])
+        if Omega_line is not None:
+            Omega_line.set_data(t_hist, Omega_vals[hist_idx])
+
+    anim = FuncAnimation(
+        fig, update, frames=len(frames), interval=1000 / fps, blit=False
+    )
+
+    # H.264 even-pixel fix
+    if outfile.lower().endswith(".mp4"):
+        _w_px = round(fig.get_figwidth()  * dpi)
+        _h_px = round(fig.get_figheight() * dpi)
+        if _w_px % 2 != 0:
+            fig.set_size_inches((_w_px + 1) / dpi, fig.get_figheight())
+        if _h_px % 2 != 0:
+            fig.set_size_inches(fig.get_figwidth(), (_h_px + 1) / dpi)
+
+    if outfile.lower().endswith(".gif"):
+        anim.save(outfile, writer="pillow", fps=fps, dpi=dpi)
+    elif outfile.lower().endswith(".mp4"):
+        anim.save(outfile, writer="ffmpeg", fps=fps, dpi=dpi)
+    else:
+        raise ValueError('outfile must end in ".mp4" or ".gif".')
+
+    plt.close(fig)
+    return outfile
 
 
 ############# Movie Making Routines
