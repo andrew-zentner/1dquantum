@@ -3,6 +3,7 @@ import numpy as np
 from scipy.fft import dst, idst  # requires SciPy
 from dataclasses import dataclass
 from typing import Callable, Dict, Protocol, Tuple, Optional
+from potentials_1d import CachedPotential
 
 Array = np.ndarray
 
@@ -59,13 +60,14 @@ def normalize(psi: Array, dy: float) -> Array:
     return psi / nrm
 
 
-#--------- Strang propagation with fft for kinetic term ---- 
+#--------- Strang propagation with fft for kinetic term ----
 def split_step_propagate(
     psi0: Array,
     V_of_y_tau: Potential1D,
     tau_grid: Array,
     grid: Grid1D,
     return_all: bool = True,
+    time_independent: bool = False,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Time-dependent 1D Schrödinger equation in units where:
@@ -76,6 +78,16 @@ def split_step_propagate(
     where V_mid is evaluated at tau + dt/2.
 
     tau_grid may be nonuniform (and must be strictly increasing).
+
+    Parameters
+    ----------
+    time_independent : bool, optional
+        Set True if V does not depend on tau (e.g. a static well or harmonic
+        trap with constant frequency).  Also triggered automatically if
+        V_of_y_tau is a CachedPotential.
+        When True and tau_grid is uniform, both the potential and kinetic
+        phase factors are pre-computed once before the loop, which gives a
+        significant speed improvement.
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -93,6 +105,34 @@ def split_step_propagate(
     if np.any(dtaus <= 0):
         raise ValueError("tau_grid must be strictly increasing.")
 
+    # ------------------------------------------------------------------
+    # Pre-computation of phase factors
+    #
+    # Kinetic phase exp(-i dt k²/2): depends only on dt, never on V.
+    #   Pre-computed whenever the time-step is uniform (almost always true).
+    #   Saves Nt calls to np.exp on a length-N array each run.
+    #
+    # Potential phase exp(-i dt/2 · V(y)): depends on both dt and V.
+    #   Pre-computed only when BOTH conditions hold:
+    #     (a) the time-step is uniform, AND
+    #     (b) V is time-independent  (user passed time_independent=True,
+    #                                  or V_of_y_tau is a CachedPotential)
+    # ------------------------------------------------------------------
+    _static = time_independent or isinstance(V_of_y_tau, CachedPotential)
+    uniform_dt = bool(np.allclose(dtaus, dtaus[0]))
+
+    _phase_k: Optional[Array] = None
+    _phase_V_half: Optional[Array] = None
+
+    if uniform_dt:
+        _phase_k = np.exp(-1.0j * float(dtaus[0]) * (k ** 2) / 2.0)
+
+    if _static and uniform_dt:
+        _V0 = np.asarray(V_of_y_tau(y, 0.0), dtype=float)
+        if _V0.shape != y.shape:
+            raise ValueError(f"V_of_y_tau returned shape {_V0.shape}, expected {y.shape}.")
+        _phase_V_half = np.exp(-0.5j * float(dtaus[0]) * _V0)
+
     psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
     norms = np.empty(Nt, dtype=float)
     if return_all:
@@ -101,20 +141,24 @@ def split_step_propagate(
 
     for n in range(Nt - 1):
         dt = float(dtaus[n])
-        tau_mid = float(tau_grid[n] + 0.5 * dt)
 
-        Vmid = np.asarray(V_of_y_tau(y, tau_mid), dtype=float)
-        if Vmid.shape != y.shape:
-            raise ValueError(f"V_of_y_tau returned shape {Vmid.shape}, expected {y.shape}.")
-
-        phase_V_half = np.exp(-0.5j * dt * Vmid)
+        # Potential phase: use pre-computed array if available,
+        # otherwise evaluate V at the step midpoint and compute on the fly.
+        if _phase_V_half is not None:
+            phase_V_half = _phase_V_half
+        else:
+            tau_mid = float(tau_grid[n] + 0.5 * dt)
+            Vmid = np.asarray(V_of_y_tau(y, tau_mid), dtype=float)
+            if Vmid.shape != y.shape:
+                raise ValueError(f"V_of_y_tau returned shape {Vmid.shape}, expected {y.shape}.")
+            phase_V_half = np.exp(-0.5j * dt * Vmid)
 
         # half potential kick
         psi *= phase_V_half
 
         # kinetic kick in k-space: T = k^2/2
         psi_k = np.fft.fft(psi)
-        psi_k *= np.exp(-1.0j * dt * (k**2) / 2.0)
+        psi_k *= _phase_k if _phase_k is not None else np.exp(-1.0j * dt * (k ** 2) / 2.0)
         psi = np.fft.ifft(psi_k)
 
         # half potential kick
@@ -134,12 +178,24 @@ def yoshida_step_propagate(
     tau_grid: Array,
     grid: Grid1D,
     return_all: bool = True,
+    time_independent: bool = False,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Same TDSE as split_step_propagate(), but with a 4th-order Suzuki–Yoshida
     composition of Strang steps.
 
     For time-dependent V, each sub-step evaluates V at the midpoint time of that sub-step.
+
+    Parameters
+    ----------
+    time_independent : bool, optional
+        Set True if V does not depend on tau.  Also triggered automatically if
+        V_of_y_tau is a CachedPotential.
+        Yoshida composes three Strang sub-steps per outer step with sub-step
+        sizes a*dt, b*dt, a*dt (b is negative).  When time_independent is True
+        and tau_grid is uniform, all six phase arrays (two kinetic, two
+        potential, one pair per distinct sub-step size) are pre-computed once
+        before the loop.
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -157,27 +213,66 @@ def yoshida_step_propagate(
     if np.any(dtaus <= 0):
         raise ValueError("tau_grid must be strictly increasing.")
 
+    # Yoshida coefficients
+    cbrt2 = 2.0 ** (1.0 / 3.0)
+    a = 1.0 / (2.0 - cbrt2)
+    b = -cbrt2 / (2.0 - cbrt2)
+
+    # ------------------------------------------------------------------
+    # Pre-computation of phase factors
+    #
+    # Yoshida uses three Strang sub-steps per outer step with sizes
+    #   a*dt,  b*dt,  a*dt   (note: b is negative, ~-1.70)
+    # Each distinct sub-step size needs its own kinetic and potential
+    # phase array, giving up to four pre-computed arrays total.
+    #
+    # Kinetic phases _phase_k_a / _phase_k_b: pre-computed when dt is uniform.
+    # Potential phases _phase_V_a / _phase_V_b: pre-computed when dt is
+    #   uniform AND V is time-independent.
+    # ------------------------------------------------------------------
+    _static = time_independent or isinstance(V_of_y_tau, CachedPotential)
+    uniform_dt = bool(np.allclose(dtaus, dtaus[0]))
+
+    _phase_k_a: Optional[Array] = None
+    _phase_k_b: Optional[Array] = None
+    _phase_V_a: Optional[Array] = None
+    _phase_V_b: Optional[Array] = None
+
+    if uniform_dt:
+        dt0 = float(dtaus[0])
+        _phase_k_a = np.exp(-1.0j * a * dt0 * (k ** 2) / 2.0)
+        _phase_k_b = np.exp(-1.0j * b * dt0 * (k ** 2) / 2.0)
+
+    if _static and uniform_dt:
+        _V0 = np.asarray(V_of_y_tau(y, 0.0), dtype=float)
+        if _V0.shape != y.shape:
+            raise ValueError(f"V_of_y_tau returned shape {_V0.shape}, expected {y.shape}.")
+        _phase_V_a = np.exp(-0.5j * a * dt0 * _V0)
+        _phase_V_b = np.exp(-0.5j * b * dt0 * _V0)
+
     psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
     norms = np.empty(Nt, dtype=float)
     if return_all:
         psi_out[0] = psi
     norms[0] = np.sum(np.abs(psi) ** 2) * dy
 
-    # Yoshida coefficients
-    cbrt2 = 2.0 ** (1.0 / 3.0)
-    a = 1.0 / (2.0 - cbrt2)
-    b = -cbrt2 / (2.0 - cbrt2)
-
-    def strang_step_inplace(psi_arr: Array, tau_start: float, dt: float) -> None:
-        tau_mid = float(tau_start + 0.5 * dt)
-        Vmid = np.asarray(V_of_y_tau(y, tau_mid), dtype=float)
-        if Vmid.shape != y.shape:
-            raise ValueError(f"V_of_y_tau returned shape {Vmid.shape}, expected {y.shape}.")
-        phase_V_half = np.exp(-0.5j * dt * Vmid)
+    def strang_step_inplace(psi_arr: Array, tau_start: float, dt_sub: float,
+                             phase_k_pre: Optional[Array],
+                             phase_V_pre: Optional[Array]) -> None:
+        # Potential phase: use pre-computed array if provided,
+        # otherwise evaluate V at the sub-step midpoint and compute on the fly.
+        if phase_V_pre is not None:
+            phase_V_half = phase_V_pre
+        else:
+            tau_mid = float(tau_start + 0.5 * dt_sub)
+            Vmid = np.asarray(V_of_y_tau(y, tau_mid), dtype=float)
+            if Vmid.shape != y.shape:
+                raise ValueError(f"V_of_y_tau returned shape {Vmid.shape}, expected {y.shape}.")
+            phase_V_half = np.exp(-0.5j * dt_sub * Vmid)
 
         psi_arr *= phase_V_half
         psi_k = np.fft.fft(psi_arr)
-        psi_k *= np.exp(-1.0j * dt * (k**2) / 2.0)
+        psi_k *= phase_k_pre if phase_k_pre is not None else np.exp(-1.0j * dt_sub * (k ** 2) / 2.0)
         psi_arr[:] = np.fft.ifft(psi_k)
         psi_arr *= phase_V_half
 
@@ -186,9 +281,10 @@ def yoshida_step_propagate(
         tau0 = float(tau_grid[n])
 
         # Compose: S(a dt) S(b dt) S(a dt)
-        strang_step_inplace(psi, tau0, a * dt)
-        strang_step_inplace(psi, tau0 + a * dt, b * dt)
-        strang_step_inplace(psi, tau0 + (a + b) * dt, a * dt)
+        # Pre-computed phase arrays are passed in when available (not None).
+        strang_step_inplace(psi, tau0,              a * dt, _phase_k_a, _phase_V_a)
+        strang_step_inplace(psi, tau0 + a * dt,     b * dt, _phase_k_b, _phase_V_b)
+        strang_step_inplace(psi, tau0 + (a+b) * dt, a * dt, _phase_k_a, _phase_V_a)
 
         if return_all:
             psi_out[n + 1] = psi
