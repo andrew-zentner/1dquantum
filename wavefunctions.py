@@ -197,7 +197,7 @@ def gaussian_wavepacket(y: np.ndarray,
     carrier  = np.exp(1.0j * k0 * y)
     return (norm * envelope * carrier).astype(np.complex128)
 
-
+#--- wavepacket energy
 def gaussian_wavepacket_energy(k0: float, sigma: float) -> float:
     """
     Mean energy of gaussian_wavepacket under H = -1/2 d^2/dy^2:

@@ -232,7 +232,7 @@ class StepBarrier:
 @dataclass(frozen=True)
 class SquareBarrier:
     v0: float
-    a: float = 0.0   # centre of barrier
+    x0: float = 0.0   # centre of barrier
     w: float = 1.0   # width of barrier
 
     def __call__(self,
@@ -240,7 +240,7 @@ class SquareBarrier:
                  tau: float) -> np.ndarray:
         y = np.asarray(y, dtype=float)
         v_out = np.zeros_like(y, dtype=float)
-        v_out[np.abs(y - float(self.a)) <= 0.5 * float(self.w)] = float(self.v0)
+        v_out[np.abs(y - float(self.x0)) <= 0.5 * float(self.w)] = float(self.v0)
         return v_out
     
 
@@ -270,6 +270,8 @@ class CosinePotential:
         return ( self.Vshift + self.V0*np.cos(2.0*np.pi*y/self.a + self.phi) )
 #----------------------------------------
     
+
+
 #----------------------------------------
 #
 # Multi cosine potential
@@ -394,9 +396,10 @@ class PeriodicDiatomicGaussianWell:
 #-----------------------------------------
 @dataclass(frozen=True)
 class SoftBarrier:
-    V0: float            # height or depth (if negative)
+    v0: float            # height or depth (if negative)
     delta: float = 0.1   # transition length
     w: float = 1.0       # well width, defaults to 1
+    x0: float = 0.0      # well central position
 
     def __post_init__(self):
         if ( self.delta <= 1.0e-24 ):
@@ -408,9 +411,10 @@ class SoftBarrier:
                  y: np.ndarray,
                  tau: float) -> np.ndarray:
         half_w=self.w/2.0
-        v = 0.5*self.V0*(
-            np.tanh((y+half_w)/self.delta)
-            -np.tanh((y-half_w)/self.delta) )
+        z = y-self.x0
+        v = 0.5*self.v0*(
+            np.tanh((z+half_w)/self.delta)
+            -np.tanh((z-half_w)/self.delta) )
         return v
 #------------------------------------------
 
@@ -424,9 +428,9 @@ class SoftBarrier:
 class PeriodicSoftBarrier:
     V0: float
     delta: float = 0.1
-    w: float = 1.0
-    a: float = 2.5
-    x0: float = 0.0
+    w: float = 1.0  # widthof one barrier
+    a: float = 2.5  # periodicity
+    x0: float = 0.0 # central position
 
     def __post_init__(self):
         print(
@@ -550,6 +554,82 @@ class PeriodicDiatomicSoftBarrier:
         return v1 + v2
 #--------------------------------------------------------------
 
+#--------------------------------------------------------------
+#
+# Quartic Double Well Potential.
+#
+# Energies are in units of hbar^2/(m*a^2)
+# 
+#--------------------------------------------------------------
+@dataclass(frozen=True)
+class QuarticDoubleWell:
+    lam: float # Well coupling
+    a: float # position of well minima
+
+    def __post_init__(self):
+        if np.abs(self.lam) <= 1.0e-24:
+            raise ValueError("lam must be nonzero.")
+        if (self.a <= 1.0e-24):
+            raise ValueError("a must be finite and nonzero.")
+
+    def __call__(self,
+                 y: np.ndarray,
+                 tau: float) -> np.ndarray:
+        return self.lam*( (y**2 - self.a**2)**2 )
+#------------------------------------------
+
+#--------------------------------------------------------------
+#
+# Tilted Quartic Double Well Potential.
+#
+# Energies are in units of hbar^2/(m*a^2)
+# 
+#--------------------------------------------------------------
+@dataclass(frozen=True)
+class TiltedQuarticDoubleWell:
+    lam: float            # Well coupling
+    a: float              # position of well minima
+    epsilon: float = 0.0  # the tilt of the potential
+
+    def __post_init__(self):
+        if np.abs(self.lam) <= 1.0e-24:
+            raise ValueError("lam must be nonzero.")
+        if (self.a <= 1.0e-24):
+            raise ValueError("a must be finite and nonzero.")
+
+    def __call__(self,
+                 y: np.ndarray,
+                 tau: float) -> np.ndarray:
+        return self.lam*( (y**2 - self.a**2)**2 ) - self.epsilon*y
+#------------------------------------------
+
+#---------------------------------------------------------------
+#
+# Time Evolving Tilted Quartic Double Well.
+#
+#---------------------------------------------------------------
+@dataclass(frozen=True)
+class EvolvingQuarticDoubleWell:
+    lam: float
+    a: float
+    eps0: float = 0.0        # amplitude of sweep
+    t0: float   = 0.0        # central time of sweep
+    tau_sweep: float = 1.0   # sweep rate
+
+    def epsilon(self, tau: float) -> float:
+        return self.eps0 * np.tanh((tau - self.t0) / self.tau_sweep)
+
+    def __call__(self, y: np.ndarray, tau: float) -> np.ndarray:
+        y = np.asarray(y, dtype=float)
+        return self.lam * (y**2 - self.a**2)**2 + self.epsilon(tau) * y
+#---------------------------------------------------------------
+
+
+
+
+#===============================================================
+# Below are some utilities that work with classes defined above.
+#===============================================================
 
 #===============================================================
 #
@@ -603,6 +683,7 @@ def Vsum(*pots):
         else:
             flat.append(p)
     return SumPotential(tuple(flat))
+#----------------------------------------------------------------
 
     
 #----------------------------------------------------------------

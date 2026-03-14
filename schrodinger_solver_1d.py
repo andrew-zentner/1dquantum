@@ -60,13 +60,32 @@ def normalize(psi: Array, dy: float) -> Array:
     return psi / nrm
 
 
+def _make_save_plan(Nt: int, save_every: int):
+    """
+    Return (save_list, save_set, save_order) for a propagation with Nt time points.
+
+    save_every=1  — every step  (like the old return_all=True)
+    save_every=k  — every k-th step; final step always included
+    save_every=0  — final step only  (like the old return_all=False)
+    """
+    if save_every == 0:
+        save_list = [Nt - 1]
+    else:
+        save_list = list(range(0, Nt, save_every))
+        if save_list[-1] != Nt - 1:
+            save_list.append(Nt - 1)   # always include final step
+    save_set   = set(save_list)
+    save_order = {step: i for i, step in enumerate(save_list)}
+    return save_list, save_set, save_order
+
+
 #--------- Strang propagation with fft for kinetic term ----
 def split_step_propagate(
     psi0: Array,
     V_of_y_tau: Potential1D,
     tau_grid: Array,
     grid: Grid1D,
-    return_all: bool = True,
+    save_every: int = 1,
     time_independent: bool = False,
     cap: Optional[Array] = None,
 ) -> Tuple[Array, Dict[str, Array]]:
@@ -82,6 +101,15 @@ def split_step_propagate(
 
     Parameters
     ----------
+    save_every : int, optional
+        Controls snapshot cadence in the output array.
+        save_every=1  (default) — store every step; output shape (Nt, N).
+        save_every=k  — store every k-th step plus the final step;
+                        output shape is approximately (Nt // k, N).
+                        Useful for large grids or long runs where storing
+                        every frame would exhaust memory.
+        save_every=0  — store only the final state; output shape (1, N).
+        diagnostics["tau"] is subsampled to match.
     time_independent : bool, optional
         Set True if V does not depend on tau (e.g. a static well or harmonic
         trap with constant frequency).  Also triggered automatically if
@@ -153,11 +181,14 @@ def split_step_propagate(
         if _phase_V_half is not None and _cap_half is not None:
             _phase_V_half = _phase_V_half * _cap_half   # merge into single array
 
-    psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
-    norms = np.empty(Nt, dtype=float)
-    if return_all:
-        psi_out[0] = psi
-    norms[0] = np.sum(np.abs(psi) ** 2) * dy
+    # --- output cadence ---
+    save_list, save_set, save_order = _make_save_plan(Nt, save_every)
+    n_saved = len(save_list)
+    psi_out = np.empty((n_saved, psi.size), dtype=np.complex128)
+    norms   = np.empty(n_saved, dtype=float)
+    if 0 in save_set:
+        psi_out[save_order[0]] = psi
+        norms[save_order[0]]   = np.sum(np.abs(psi) ** 2) * dy
 
     for n in range(Nt - 1):
         dt = float(dtaus[n])
@@ -189,12 +220,13 @@ def split_step_propagate(
         # half potential kick
         psi *= phase_V_half
 
-        if return_all:
-            psi_out[n + 1] = psi
-        norms[n + 1] = np.sum(np.abs(psi) ** 2) * dy
+        if (n + 1) in save_set:
+            idx = save_order[n + 1]
+            psi_out[idx] = psi
+            norms[idx]   = np.sum(np.abs(psi) ** 2) * dy
 
-    diagnostics = {"tau": tau_grid.copy(), "norm": norms}
-    return (psi_out if return_all else psi), diagnostics
+    diagnostics = {"tau": tau_grid[save_list], "norm": norms}
+    return psi_out, diagnostics
 
 #--- 4th order Yoshida with Strang-split steps -----------------
 def yoshida_step_propagate(
@@ -202,7 +234,7 @@ def yoshida_step_propagate(
     V_of_y_tau: Potential1D,
     tau_grid: Array,
     grid: Grid1D,
-    return_all: bool = True,
+    save_every: int = 1,
     time_independent: bool = False,
     cap: Optional[Array] = None,
 ) -> Tuple[Array, Dict[str, Array]]:
@@ -214,6 +246,8 @@ def yoshida_step_propagate(
 
     Parameters
     ----------
+    save_every : int, optional
+        Controls snapshot cadence (see split_step_propagate for full description).
     time_independent : bool, optional
         Set True if V does not depend on tau.  Also triggered automatically if
         V_of_y_tau is a CachedPotential.
@@ -295,11 +329,14 @@ def yoshida_step_propagate(
         if uniform_dt:
             _cap_half = np.exp(-0.5 * dt0 * cap)
 
-    psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
-    norms = np.empty(Nt, dtype=float)
-    if return_all:
-        psi_out[0] = psi
-    norms[0] = np.sum(np.abs(psi) ** 2) * dy
+    # --- output cadence ---
+    save_list, save_set, save_order = _make_save_plan(Nt, save_every)
+    n_saved = len(save_list)
+    psi_out = np.empty((n_saved, psi.size), dtype=np.complex128)
+    norms   = np.empty(n_saved, dtype=float)
+    if 0 in save_set:
+        psi_out[save_order[0]] = psi
+        norms[save_order[0]]   = np.sum(np.abs(psi) ** 2) * dy
 
     def strang_step_inplace(psi_arr: Array, tau_start: float, dt_sub: float,
                              phase_k_pre: Optional[Array],
@@ -343,17 +380,18 @@ def yoshida_step_propagate(
         elif cap is not None:
             psi *= np.exp(-0.5 * dt * cap)
 
-        if return_all:
-            psi_out[n + 1] = psi
-        norms[n + 1] = np.sum(np.abs(psi) ** 2) * dy
+        if (n + 1) in save_set:
+            idx = save_order[n + 1]
+            psi_out[idx] = psi
+            norms[idx]   = np.sum(np.abs(psi) ** 2) * dy
 
-    diagnostics = {"tau": tau_grid.copy(), "norm": norms}
-    return (psi_out if return_all else psi), diagnostics
+    diagnostics = {"tau": tau_grid[save_list], "norm": norms}
+    return psi_out, diagnostics
 
 
 #--------------------------------------------------------------------------------
 #
-# Below is a DST based solver to enforce Dirichlet boundary conditions when 
+# Below is a DST based solver to enforce Dirichlet boundary conditions when
 # required.
 #
 #---------------------------------------------------------------------------------
@@ -406,7 +444,7 @@ def split_step_propagate_dirichlet(
     V_of_y_tau: Potential1D,
     tau_grid: Array,
     grid: Grid1D,
-    return_all: bool = True,
+    save_every: int = 1,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Dirichlet/DST version of split_step_propagate().
@@ -418,6 +456,11 @@ def split_step_propagate_dirichlet(
         psi(-y_max) = psi(+y_max) = 0
 
     Uses Strang splitting, evaluating V at the midpoint of each step.
+
+    Parameters
+    ----------
+    save_every : int, optional
+        Controls snapshot cadence (see split_step_propagate for full description).
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -435,11 +478,14 @@ def split_step_propagate_dirichlet(
     if np.any(dtaus <= 0):
         raise ValueError("tau_grid must be strictly increasing.")
 
-    psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
-    norms = np.empty(Nt, dtype=float)
-    if return_all:
-        psi_out[0] = psi
-    norms[0] = np.sum(np.abs(psi) ** 2) * dy
+    # --- output cadence ---
+    save_list, save_set, save_order = _make_save_plan(Nt, save_every)
+    n_saved = len(save_list)
+    psi_out = np.empty((n_saved, psi.size), dtype=np.complex128)
+    norms   = np.empty(n_saved, dtype=float)
+    if 0 in save_set:
+        psi_out[save_order[0]] = psi
+        norms[save_order[0]]   = np.sum(np.abs(psi) ** 2) * dy
 
     for n in range(Nt - 1):
         dt = float(dtaus[n])
@@ -462,12 +508,13 @@ def split_step_propagate_dirichlet(
         # half potential kick
         psi *= phase_V_half
 
-        if return_all:
-            psi_out[n + 1] = psi
-        norms[n + 1] = np.sum(np.abs(psi) ** 2) * dy
+        if (n + 1) in save_set:
+            idx = save_order[n + 1]
+            psi_out[idx] = psi
+            norms[idx]   = np.sum(np.abs(psi) ** 2) * dy
 
-    diagnostics = {"tau": tau_grid.copy(), "norm": norms}
-    return (psi_out if return_all else psi), diagnostics
+    diagnostics = {"tau": tau_grid[save_list], "norm": norms}
+    return psi_out, diagnostics
 
 
 def yoshida_step_propagate_dirichlet(
@@ -475,10 +522,15 @@ def yoshida_step_propagate_dirichlet(
     V_of_y_tau: Potential1D,
     tau_grid: Array,
     grid: Grid1D,
-    return_all: bool = True,
+    save_every: int = 1,
 ) -> Tuple[Array, Dict[str, Array]]:
     """
     Dirichlet/DST version of yoshida_step_propagate() (4th-order Suzuki–Yoshida).
+
+    Parameters
+    ----------
+    save_every : int, optional
+        Controls snapshot cadence (see split_step_propagate for full description).
     """
     y, k, dy = grid.y, grid.k, grid.dy
 
@@ -496,11 +548,14 @@ def yoshida_step_propagate_dirichlet(
     if np.any(dtaus <= 0):
         raise ValueError("tau_grid must be strictly increasing.")
 
-    psi_out = np.empty((Nt, psi.size), dtype=np.complex128) if return_all else None
-    norms = np.empty(Nt, dtype=float)
-    if return_all:
-        psi_out[0] = psi
-    norms[0] = np.sum(np.abs(psi) ** 2) * dy
+    # --- output cadence ---
+    save_list, save_set, save_order = _make_save_plan(Nt, save_every)
+    n_saved = len(save_list)
+    psi_out = np.empty((n_saved, psi.size), dtype=np.complex128)
+    norms   = np.empty(n_saved, dtype=float)
+    if 0 in save_set:
+        psi_out[save_order[0]] = psi
+        norms[save_order[0]]   = np.sum(np.abs(psi) ** 2) * dy
 
     # Yoshida coefficients
     cbrt2 = 2.0 ** (1.0 / 3.0)
@@ -529,12 +584,13 @@ def yoshida_step_propagate_dirichlet(
         strang_step_inplace_dirichlet(psi, tau0 + a_coef * dt, b_coef * dt)
         strang_step_inplace_dirichlet(psi, tau0 + (a_coef + b_coef) * dt, a_coef * dt)
 
-        if return_all:
-            psi_out[n + 1] = psi
-        norms[n + 1] = np.sum(np.abs(psi) ** 2) * dy
+        if (n + 1) in save_set:
+            idx = save_order[n + 1]
+            psi_out[idx] = psi
+            norms[idx]   = np.sum(np.abs(psi) ** 2) * dy
 
-    diagnostics = {"tau": tau_grid.copy(), "norm": norms}
-    return (psi_out if return_all else psi), diagnostics
+    diagnostics = {"tau": tau_grid[save_list], "norm": norms}
+    return psi_out, diagnostics
 
 
 #--------------------------------------------------------

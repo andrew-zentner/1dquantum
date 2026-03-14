@@ -17,13 +17,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from schrodinger_solver_1d import make_grid, split_step_propagate
 from wavefunctions import gaussian_wavepacket, gaussian_wavepacket_energy
-from wavefunction_movies import make_movie
-from potentials_1d import SquareBarrier, CachedPotential, ComplexAbsorbingPotential, SumPotential
+from wavefunction_movies import make_scattering_movie
+from potentials_1d import SquareBarrier, SoftBarrier, CachedPotential, CosinePotential
+from potentials_1d import ComplexAbsorbingPotential, SumPotential
 
 # ---------------------------------------------------------------------------
 # Grid
 # ---------------------------------------------------------------------------
-N     = 2**12
+N     = 2**13
 y_max = 16.0
 grid  = make_grid(N, y_max)
 
@@ -32,11 +33,17 @@ grid  = make_grid(N, y_max)
 # SquareBarrier(v0, a): height v0, width=1, centred at a.
 # CachedPotential memoises the result so V is evaluated only once.
 # ---------------------------------------------------------------------------
-V0             = 6.0
+
+V0             = 10.0
 barrier_center = 0.0
-#barrier        = CachedPotential(SquareBarrier(v0=V0, a=barrier_center, w=1.0))
-barrier        = CachedPotential( SumPotential([SquareBarrier(v0=0.9*V0,a=barrier_center, w=1.0),
-                                                SquareBarrier(v0=1.1*V0,a=barrier_center+4.0,w=1.0)]) )
+width          = 1.0
+
+#barrier        = CachedPotential( CosinePotential(V0=V0,Vshift=V0,a=8.0) )
+
+barrier        = CachedPotential( SoftBarrier(v0=V0, delta=0.10, w=0.50, x0=0.0) )
+
+#barrier        = CachedPotential( SumPotential([SquareBarrier(v0=0.9*V0,a=barrier_center, w=1.0),
+#                                                SquareBarrier(v0=1.1*V0,a=barrier_center+4.0,w=1.0)]) )
 
 # ---------------------------------------------------------------------------
 # Initial Gaussian wavepacket
@@ -67,8 +74,8 @@ print()
 # imaginary cap potential to absorb wavefunctions that run off of the "edge" of 
 # the computational grid.
 #----------------------------------------------------------------------------
-w_potential = ComplexAbsorbingPotential(strength=10.0,
-                                  width=4.0,
+w_potential = ComplexAbsorbingPotential(strength=12.0,
+                                  width=3.0,
                                   y_max=y_max)
 w_cap = w_potential(grid.y,0.0)
 
@@ -82,7 +89,7 @@ psi_t, diag = split_step_propagate(
     return_all=True,
     cap=w_cap
 )
-print(f"  Done.  Norm at final step: {diag['norm'][-1]:.10f}  (should be 1.0)")
+print(f"  Done.  Norm at final step: {diag['norm'][-1]:.10f}  (decreases as CAP absorbs outgoing packets)")
 print()
 
 # ---------------------------------------------------------------------------
@@ -97,7 +104,7 @@ stride   = 8        # keep every 7th frame  → ~501 frames at 30 fps ≈ 17 s
 outfile  = os.path.join(os.path.dirname(__file__), "square_barrier_scattering.mp4")
 
 print("Rendering movie ...")
-out = make_movie(
+out = make_scattering_movie(
     psi_t, grid, tau,
     outfile=outfile,
     what="abs2",
@@ -107,8 +114,8 @@ out = make_movie(
     dpi=150,
     figsize=(9, 5),
     xlim=(-12.0, 12.0),
-    ylim=(0.0, 0.60),
-    Vlim=(0.0, 8.0),
+    ylim=(0.0, 0.70),
+    Vlim=(0.0, 10.5),
     psi_color="midnightblue",
     potential_color="firebrick",
     potential_alpha=0.75,
